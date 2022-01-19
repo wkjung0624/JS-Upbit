@@ -5,7 +5,14 @@
   "main": "app.js",
   "dependencies": {
     "axios": "^0.24.0",
+    "crypto": "^1.0.1",
     "dotenv": "^14.2.0",
+    "jsonwebtoken": "^8.5.1",
+    "querystring": "^0.2.1",
+    "request": "^2.88.2",
+    "requests": "^0.3.0",
+    "sha512": "0.0.1",
+    "uuid": "^8.3.2",
     "winston": "^3.4.0",
     "ws": "^8.4.2"
   },
