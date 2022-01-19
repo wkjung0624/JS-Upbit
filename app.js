@@ -2,7 +2,9 @@
  * @author mightyotter <skyship36@gmail.com>
  */
 
+/** DB 모듈 */
 // const redis = require('redis');
+// const mysql = require('mysql');
 
 /** Upbit API 연결을 위한 모듈 */
 const axios = require("axios");
@@ -38,16 +40,6 @@ dotenv.config({ path: '.env' });
 const access_key = process.env.UPBIT_OPEN_API_ACCESS_KEY
 const secret_key = process.env.UPBIT_OPEN_API_SECRET_KEY
 const server_url = process.env.UPBIT_OPEN_API_SERVER_URL
-
-var config = {
-    defaults: {
-        players: 1,
-        level:   'beginner',
-        treasure: {
-            gold: 0
-        }
-    }
-};
 
 /** 현재 매수한 모든 코인 정보 
  * @namespace                               
@@ -106,13 +98,12 @@ const strategy = {
     // 볼린저밴드, https://github.com/Jeongseup/DACON-BitcoinTrader2
     "Others" : {},
 }
-strategy['Volatility Breakout'].BUY()
 
 /** 
  * 업비트 API 에서 발행한 키를 통해 JWT 를 생성함
  * @param   {string}    accKey      - 업비트 API 에서 발행한 ACCESS KEY
  * @param   {string}    secKey      - 업비트 API 에서 발행한 SECRET KEY
- * @param   {object=}   bodyParam   - ('POST'|'DELETE') 방식의 API 호출 시 body 에 넣을 파라미터
+ * @param   {?object}   bodyParam   - ('POST'|'DELETE') 방식의 API 호출 시 body 에 넣을 파라미터
  * @returns {string}
  */
 const createJWT = (accKey, secKey, bodyParam) => {
@@ -159,11 +150,11 @@ const getAccountInfo = async (authToken) => {
 
 /**
  * @TODO 예외처리, 함수 파라미터, 코드 정리가 필요해보임
- * @param   {string}  ticker      - '마켓-코인명' 으로 되어있는 값 (예:KRW-BTC)
- * @param   {string}  side        - 주문종류 : bid (매수), ask (매도)
- * @param   {string}  volume      - 주문량 (지정가, 시장가 매도 시 필수)
- * @param   {string}  price       - 주문 가격 (지정가, 시장가 매수 시 필수)
- * @param   {string=} ord_type    - 주문 타입 (필수) : limit (지정가), price (시장가 매수), market(시장가 매도)
+ * @param   {!string}   ticker              - '마켓-코인명' 으로 되어있는 값 (예:KRW-BTC)
+ * @param   {!string}   side                - 주문종류 : bid (매수), ask (매도)
+ * @param   {string}    volume              - 주문량 (지정가, 시장가 매도 시 필수)
+ * @param   {string}    price               - 주문 가격 (지정가, 시장가 매수 시 필수)
+ * @param   {!string}   [ord_type="limit"]  - 주문 타입 (필수) : limit (지정가), price (시장가 매수), market(시장가 매도)
  * @returns {object}
  */
 const makeOrder = async (ticker, side, volume, price, ord_type='limit') => {
@@ -189,7 +180,7 @@ const makeOrder = async (ticker, side, volume, price, ord_type='limit') => {
 
 /** 
  * 현재시간을 Unixtime 형태로 가져오는 함수
- * @param {string} format 'second' 입력 시 초단위 결과값 출력(Default millisecond, 12자리)
+ * @param   {string}    [format='second']   - 입력 시 초단위 결과값 출력(Default millisecond, 12자리)
  * @returns {string}
  */
 const getCurrentUnixTime = (format="second") => {
@@ -204,8 +195,8 @@ const getCurrentUnixTime = (format="second") => {
 
 /** 
  * Upbit 에 상장된 코인 정보를 요청하는 함수
- * @param   {string=}   market      - ('ALL'|'KRW'|'BTC') 입력 시 (전체|원화|비트코인) 매매가 가능한 코인 목록을 반환함
- * @param   {bool=}     includeWarn - 'true' 입력 시 유의 종목을 포함한 목록을 반환함
+ * @param   {string}    [market="KRW"]          - ('ALL'|'KRW'|'BTC') 입력 시 (전체|원화|비트코인) 매매가 가능한 코인 목록을 반환함
+ * @param   {bool}      [includeWarn=false]     - 'true' 입력 시 유의 종목을 포함한 목록을 반환함
  * @returns {object[]} 
  */
 const getSymbol = async(market="KRW", includeWarn=false) => {
@@ -233,8 +224,8 @@ const getSymbol = async(market="KRW", includeWarn=false) => {
 /** 
  * Upbit API 에 캔들정보를 요청하는 함수.
  * @TODO 예외 처리가 되어있지 않음
- * @param   {!string} symbol    - '시장-코인명' 으로 된 Ticker (예:KRW-BTC)
- * @param   {number=} count     - 현재 시점으로 부터 조회할 캔들의 갯수 (예:2 일때 오늘+어제 데이터를 받음)
+ * @param   {!string}   symbol     - '시장-코인명' 으로 된 Ticker (예:KRW-BTC)
+ * @param   {number}    [count=1]   - 현재 시점으로 부터 조회할 캔들의 갯수 (예:2 일때 오늘+어제 데이터를 받음)
  * @returns {array}
  */
 const getCandle = async (symbol, count=1) => {
@@ -252,8 +243,8 @@ const getCandle = async (symbol, count=1) => {
 
 /**
  * Object 내 모든 value 가 true 일 때 true 를 반환
- * @param   {object{}} item     - boolean 이 담겨있는 Array
- * @returns {boolean}
+ * @param       {object}    item     - 값이 boolean 인 Object 를 담고있는 Object
+ * @returns     {boolean}
  */
 const checkCondition = function (item) {
     
@@ -307,8 +298,7 @@ const main = async() => {
             // {"isOnlyRealtime" : false},
         ]));
 
-        /*
-        체결 정보 요청 부분
+        /** 체결 정보 요청 부분 구현필요
         socket.send(JSON.stringify([
             {"ticket" : `UUID-MIGHTY-OTTER2`},
             {"type" : "trade", "codes" : symbols.map(item => item.market)},{"format":"SIMPLE"}
