@@ -8,6 +8,7 @@
     "crypto": "^1.0.1",
     "dotenv": "^14.2.0",
     "jsonwebtoken": "^8.5.1",
+    "node-telegram-bot-api": "^0.56.0",
     "querystring": "^0.2.1",
     "request": "^2.88.2",
     "requests": "^0.3.0",
