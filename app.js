@@ -27,19 +27,25 @@ const logger = winston.createLogger({
     transports: [
       //
       // - Write all logs with importance level of `error` or less to `error.log`
-      // - Write all logs with importance level of `info` or less to `combined.log`
+      // - Write all logs with importance level of `info` or less to `trade.log`
       //
       new winston.transports.File({ filename: 'error.log', level: 'error' }),
-      new winston.transports.File({ filename: 'combined.log' }),
+      new winston.transports.File({ filename: 'trade.log' }),
     ],
 });
-
 
 dotenv.config({ path: '.env' });
 
 const access_key = process.env.UPBIT_OPEN_API_ACCESS_KEY
 const secret_key = process.env.UPBIT_OPEN_API_SECRET_KEY
 const server_url = process.env.UPBIT_OPEN_API_SERVER_URL
+const dev_mode = process.env.DEV_MODE
+
+/** 텔레그램 봇 연계를 위한 모듈 */
+const TelegramBot = require('node-telegram-bot-api');
+const token = process.env.TELEGRAM_BOT_API_TOKEN
+const bot = new TelegramBot(token, { polling: true })
+
 
 /** 현재 매수한 모든 코인 정보 
  * @namespace                               
@@ -104,7 +110,7 @@ const strategy = {
  * @param   {string}    accKey      - 업비트 API 에서 발행한 ACCESS KEY
  * @param   {string}    secKey      - 업비트 API 에서 발행한 SECRET KEY
  * @param   {?object}   bodyParam   - ('POST'|'DELETE') 방식의 API 호출 시 body 에 넣을 파라미터
- * @returns {string}
+ * @returns {string}                - JWT를 반환
  */
 const createJWT = (accKey, secKey, bodyParam) => {
 
@@ -112,21 +118,21 @@ const createJWT = (accKey, secKey, bodyParam) => {
         access_key: accKey,
         nonce: uuidv4(),
     }
-    let extendedPayload = {};
 
     if (bodyParam) {
         const query = queryEncode(bodyParam)
         const hash = crypto.createHash('sha512')
         const queryHash = hash.update(query, 'utf-8').digest('hex')
 
-        extendedPayload = {
-            query_hash: queryHash,
-            query_hash_alg: 'SHA512'
-        }
+        console.log(query)
+        console.log(hash)
+        console.log(queryHash)
+
+        payload.query_hash = queryHash
+        payload.query_hash_alg = 'SHA512'
     }
 
-    const combinedPayload = Object.assign(payload, extendedPayload);
-    const token = sign(combinedPayload, secKey)
+    const token = sign(payload, secKey)
 
     return `Bearer ${token}`;
 }
@@ -254,40 +260,53 @@ const checkCondition = function (item) {
     return true;
 }
 
+/**
+ * 자동매매 실행 전 과거 차트데이터를 미리 받아오는 함수
+ */
+let candle = {};
+let symbols = [];
 
-/** 메인 프로세스 실행 */
-const main = async() => {
-      
-    let socket = new WebSocket(`wss://api.upbit.com/websocket/v1`);
-    
-    let candle = {};
-
-    const symbols = await getSymbol();
+const prepareTrade = async () => {
+    symbols = await getSymbol();
     let symbolCount = 0;
-    
+
+    logger.log({
+        level: 'info',
+        message: `[DAY_OVER] (${getCurrentUnixTime()}) get new candles...`
+    });
+
     for (const item of symbols){
-        console.log(`${item.market} (${symbolCount*250}) milliseconds`);
+        console.log(`${item.market} candle info loaded...`);
         
         // 0.1초 간격으로 캔들정보를 요청함, 매일 갱신해야함 필요가 있음
         setTimeout(async() => { 
             candle[item.market] = (await getCandle(item.market, 2))[1];
             //console.log(candle[item.market]);
-            logger.log({
-                level:"info",
-                message : `${item.market} candle info added...`
-            })
         }, symbolCount * 100)
         symbolCount++;
     }
-    
-    // 60000 초 마다 알고리즘 동작 여부를 확인하는 부분
-    setInterval(() => {console.log(`!!! Health Check !!! - ${getCurrentUnixTime()}`)}, 60000) 
+}
 
+/** 메인 프로세스 실행 
+ * @todo 271 번 : candle 전역 변수 관리 어떻게할지, redis 로 관리해야하나?
+ * @todo 272 번 : symbol 전역 변수 관리, 상동
+ * @todo 프로그램 시작 시 연결됐던 웹소켓 종료
+ * @todo 인터넷 연결 끊켰을 시 예외처리(잠시멈춤 등)
+ */
+const main = async() => {
+      
+    let socket = new WebSocket(`wss://api.upbit.com/websocket/v1`);
+    
+    setInterval(() => { bot.sendMessage(1873399506, "안녕하세요!") }, 5000)
+
+    prepareTrade();
+    setInterval(prepareTrade, 86400000)
+    
     /** 웹 소켓 이벤트 선언 방법 
      * 1. socket.addEventListener('open', (event) => {})
      * 2. socket.onopen(event => {})
      */
-    
+
     /** 웹 소켓 연결이 생성됨 */
     socket.onopen = (event) => {
         // 현재 시세 요청 부분
@@ -322,7 +341,7 @@ const main = async() => {
                 oldLow : low_price
             }
             
-            console.log(`실시간 데이터 [${code}] - ${trade_price}`);
+            console.log(`[RECV][${getCurrentUnixTime()}] ${code} - ${trade_price}`);
             
             // orderBook 에 등록되지 않은 코인일 경우 매수
             if (!orderBook.hasOwnProperty(code)) {
@@ -331,34 +350,45 @@ const main = async() => {
                 if (flag) {
                     logger.log({
                         level: 'info',
-                        message: `[BUY] ${getCurrentUnixTime()} ${code} V.B ${trade_price} x x`
+                        message: `[BUY - Volatility Breakout] (${getCurrentUnixTime()}) ${code} - ${trade_price}`
                     });
 
                     // 시장가 매수
-                    const response = await makeOrder(code, "bid", "", '5000', 'price'); 
+                    if (!dev_mode){
+                        const response = await makeOrder(code, "bid", "", '5000', 'price'); 
                     
-                    orderBook[code] = {
-                        timestamp : getCurrentUnixTime(),
-                        strategy : "Volatility Breakout",
-                        amount : trade_price,
-                        quantity : trade_price / 5000,
-                        totalAmount : 5000
+                        orderBook[code] = {
+                            timestamp : getCurrentUnixTime(),
+                            strategy : "Volatility Breakout",
+                            amount : trade_price,
+                            quantity : trade_price / 5000,
+                            totalAmount : 5000
+                        }    
                     }
+                    
 
-                    console.log(`[BUY] ${getCurrentUnixTime()} ${code} V.B ${trade_price} x x`)
+                    console.log(`[BUY - Volatility Breakout][${getCurrentUnixTime()}] ${code} - ${trade_price}`)
+
+                    bot.sendMessage(1873399506, `[BUY - Volatility Breakout][${getCurrentUnixTime()}] ${code} - ${trade_price}`);
                 }
             // orderBook 에 등록된 경우 매도조건 확인
             } else {
                 let flag = strategy["Volatility Breakout"].SELL(orderBook[code].timestamp);
 
                 if (flag) {
-                    // 시장가 매도
-                    const response = await makeOrder(code, "bid", 0.1,'', 'price'); 
-                    console.log(`[SELL] ${getCurrentUnixTime()} ${code} V.B ${trade_price} x x`)
                     logger.log({
                         level: 'info',
-                        message: `[SELL] ${getCurrentUnixTime()} ${code} V.B ${trade_price} x x`
+                        message: `[SELL - Volatility Breakout][${getCurrentUnixTime()}] ${code} - ${trade_price}`
                     });
+
+                    // 시장가 매도
+                    if (!dev_mode) {
+                        const response = await makeOrder(code, "bid", 0.1,'', 'price'); 
+                        
+                    }
+                    
+                    console.log(`[SELL - Volatility Breakout][${getCurrentUnixTime()}] ${code} - ${trade_price}`)
+                    bot.sendMessage(1690886101, `[SELL - Volatility Breakout][${getCurrentUnixTime()}] ${code} - ${trade_price}`);
                 }
             }
             
@@ -373,11 +403,8 @@ const main = async() => {
 
 main();
 
-
-
-
-
 // 일 평균 거래대금, 시가총액과 변동성 간의 상관관계 확인
+
 // require 와 import 차이1, https://www.delftstack.com/ko/howto/javascript/javascript-import-vs-require/
 // require 와 import 차이2, https://hsp0418.tistory.com/147
 // require 형태에서 모듈명 alias 지정하는 방법,  https://stackoverflow.com/questions/48952736/can-i-use-alias-with-nodejs-require-function/48952855
@@ -390,3 +417,8 @@ main();
 // Unixtimestamp, https://www.unixtimestamp.com/
 // Upbit API, https://docs.upbit.com/docs
 // WebSocket, https://developer.mozilla.org/en-US/docs/Web/API/WebSocket
+// Telegram API, https://core.telegram.org/bots/api
+// Telegram Module, https://velog.io/@filoscoder/Node로-간단한-telegram-bot-생성하기
+// Telegram with AWS Lambda, https://tesilio.github.io/TelegramBot
+// Telegram ChatBot, https://berkbach.com/node-js로-telegram-챗봇-개발하기-c7087c63557d
+// Telegram deploy, https://velog.io/@dragontiger/파이썬AWS-LambdaAWS-API-Gateway-텔레그램-봇-개발-배포까지
