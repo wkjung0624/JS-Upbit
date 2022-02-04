@@ -52,6 +52,12 @@ const dev_mode = process.env.DEV_MODE
 const TelegramBot = require('node-telegram-bot-api');
 const token = process.env.TELEGRAM_BOT_API_TOKEN
 const bot = new TelegramBot(token, { polling: true })
+/**
+ * @TODO 인터넷 끊김시 처리해야 될 예외
+ * error: [polling_error] {"code":"EFATAL","message":"EFATAL: Error: read ECONNRESET"}
+ * error: [polling_error] {"code":"EFATAL","message":"EFATAL: Error: connect ETIMEDOUT 149.154.167.220:443"}
+ * error: [polling_error] {"code":"EFATAL","message":"EFATAL: Error: getaddrinfo ENOTFOUND api.telegram.org"}
+*/
 
 /** 현재 매수한 모든 코인 정보 
  * @namespace                               
@@ -90,7 +96,7 @@ const strategy = {
 
             const conditions = { 
                 "isBreakOut" : currentPrice > breakOutRange,
-                "minimumRange" : currentPrice / breakOutRange > 1.01, // 최소 1퍼 이상, 나중에 몇백만원 이상으로 변경
+                "other" : true
             }
             
             if (checkCondition(conditions)){ 
@@ -106,17 +112,19 @@ const strategy = {
          * 변동성 돌파 알고리즘 매도 조건을 검사함
          * @param {object} data     - 매도 조건 검사에 필요한 데이터 (unix timestamp)
          **/
-        SELL : function(data) {
-            if ( (getCurrentUnixTime() - orderBook[data.code].timestamp - 1800) > 0 ) {
-                
-                console.log(`selled`)
-                orderBook[data.code].state = "done"
+        SELL : async function(data) {
+            const { code, timestamp } = data
 
-                setTimeout(() => {
-                    orderBook[data.code] = 'ready';
-                    
+            const currentTime = getCurrentUnixTime()
+            const oldTime = timestamp
+            
+            if ( currentTime - oldTime - 300 > 0 ) {
+                console.log(`selled `, getCurrentUnixTime(), "    ", timestamp, '@@@@@')
+
+                setTimeout(async () => {
+                    await updateRedis(`${code}-TRADE`, 'state', 'ready');
                     // 나중에 팔 때 얼마만큼 체결됐는지 확인하기
-                }, 86400000) // 24시간 뒤 재개 ( 당일 연속매수 피하기 위함 )
+                }, 7200000) // 2시간 뒤 재개
                 return true;
             } else {
                 return false;
@@ -343,8 +351,8 @@ const checkCondition = function (item) {
 
 /**
  * 자동매매 실행 전 과거 차트데이터를 미리 받아오는 함수
+ * @todo symbols 도 redis 로 변경
  */
-let candle = {};
 let symbols = [];
 
 const init = async () => {
@@ -353,28 +361,82 @@ const init = async () => {
     })
     
     await redisClient.connect();
-    bot.sendMessage(1690886101, 'Bot start');
 }
 
 const prepareTrade = async () => {
     symbols = await getSymbol();
     let symbolCount = 0;
 
-    for (const item of symbols){
-        let code = item.market
+    try {
+        for (const item of symbols){
+            let code = item.market
 
-        // 0.1초 간격으로 캔들정보를 요청함, 매일 갱신해야함 필요가 있음
-        setTimeout(async() => { 
-            candle[code] = (await getCandle(code, 2))[1];
-            await redisClient.set(`${code}-CANDLE`, JSON.stringify(candle[code]))
-            orderBook[code] = { state : 'ready' }
-        }, symbolCount * 150)
-        symbolCount++;
+            // 0.1초 간격으로 캔들정보를 요청함, 매일 갱신해야함 필요가 있음
+            setTimeout(async() => { 
+                //candle[code] = (await getCandle(code, 2))[1];
+                await setRedis(`${code}-CANDLE`, (await getCandle(code, 2))[1])
+                //orderBook[code] = { state : 'ready' }
+                await setRedis(`${code}-TRADE`, { state : 'ready' })
+            }, symbolCount * 150)
+            symbolCount++;
+        }
+    } catch (err) {
+        console.log('candle error-', err);
     }
-
     //24시간 = 86400000
     // 1시간 =  3600000
     setTimeout(prepareTrade, 3600000)   // 다음날 다시 함수가 실행되도록 설정
+}
+
+/**
+ * 
+ * @param {string} method - get:조회, set:생성, update:수정
+ * @param {*} key 
+ * @param {*} value 
+ */
+const redisController = async (method, key, value) => {
+    switch (method) {
+        case 'get':
+            break
+        case 'set':
+            break
+        case 'update':
+            break
+    }
+}
+const isJsonString = function (value) {
+    try {
+        var json = JSON.parse(str);
+        return (typeof json === 'object');
+    } catch (e) {
+        return false;
+    }
+}
+const updateRedis = async (key, objKey, objValue) => { 
+    try {
+        const result = JSON.parse(await redisClient.get(`${key}`))
+        result[objKey] = objValue
+        await redisClient.set(`${key}`, JSON.stringify(result))
+        return result;
+    } catch {
+        return false;
+    }
+}
+const setRedis = async (key, value) => {
+    try {
+        const result = isJsonString(value) ? value : JSON.stringify(value)
+        await redisClient.set(`${key}`, result)    
+        return result;
+    } catch (err) {
+        return false;
+    }
+}
+const getRedis = async (key) => {
+    try { 
+        return JSON.parse(await redisClient.get(`${key}`))
+    } catch (err) {
+        return false;
+    }
 }
 
 /** 메인 프로세스 실행 
@@ -384,9 +446,11 @@ const prepareTrade = async () => {
  * @todo 프로그램 시작 시 연결됐던 웹소켓 종료
  * @todo 인터넷 연결 끊켰을 시 예외처리(잠시멈춤 등)
  */
-const main = async() => {
+const main = async () => {
     
+    const workState = {}
     let socket = new WebSocket(`wss://api.upbit.com/websocket/v1`);
+
     init();
     prepareTrade();
     
@@ -407,22 +471,26 @@ const main = async() => {
         try {
             let { code, trade_price, opening_price } = JSON.parse(event.data.toString()); // 현재 코인값
 
-            if (candle[code] === undefined) {
+            let tradeData = await getRedis(`${code}-TRADE`)
+            let candleData = await getRedis(`${code}-CANDLE`)
+
+            if (candleData === null) {
                 throw 'not initialized values'; // 아직 초기화되지 않은 값이면 패스
             }
+            //let { high_price, low_price } = candleData
+            //let { high_price, low_price } = candle[code] // 과거 코인값
 
-            let { high_price, low_price } = candle[code] // 과거 코인값
-        
             let params = {
                 symbol : code,
                 currentPrice : trade_price,
                 open : opening_price,
-                oldHigh : high_price,
-                oldLow : low_price
+                oldHigh : candleData.high_price,
+                oldLow : candleData.low_price
             }
             
             // orderBook 에 매수대기(ready)인 항목만 매수
-            if (orderBook[code].state === 'ready') {
+            if ( tradeData.state === 'ready' ) {
+            //if (orderBook[code].state === 'ready') {
                 let flag = strategy["Volatility Breakout"].BUY(params);
                 let response = {uuid:null,side:null,ord_type:null,volume:null};
 
@@ -445,8 +513,8 @@ const main = async() => {
                         state : 'waiting',
                     } 
 
-                    orderBook[code] = redisValue
-                    await redisClient.set(`${code}-MARKET`, JSON.stringify(redisValue))
+                    //orderBook[code] = redisValue
+                    await setRedis(`${code}-TRADE`, redisValue)
 
                     const msg = 
                     `>> BUY : ${code}\n` +
@@ -457,9 +525,10 @@ const main = async() => {
                     `* 매수 단가\n` +
                     `   └> ${trade_price}원\n` +
                     `* 총 체결 금액 \n` +
-                    `   └> ${orderBook[code].quantity}개 ≈ ${100000}원\n`
+                    //`   └> ${orderBook[code].quantity}개 ≈ ${100000}원\n`
+                    `   └> ${tradeData.quantity}개 ≈ ${100000}원\n`
 
-                    bot.sendMessage(1690886101, msg);
+                    //bot.sendMessage(1690886101, msg);
 
                     logger.log({
                         level: 'info',
@@ -470,30 +539,36 @@ const main = async() => {
                 }
 
             // orderBook 에 매도대기(waiting)인 항목만 매도
-            } else if(orderBook[code].state === 'waiting'){
+            //} else if(orderBook[code].state === 'waiting'){
+            } else if ( tradeData.state === 'waiting' ) {
                 
-                let flag = strategy["Volatility Breakout"].SELL({code:code});
+                let flag = await strategy["Volatility Breakout"].SELL({code:code, timestamp:tradeData.timestamp});
                 
                 if (flag) {
                     // 시장가 매도
                     if (!dev_mode) {
-                        const { executed_volume } = await getOrderHistory(orderBook[code].uuid)
+                        const { executed_volume } = await getOrderHistory(tradeData.uuid)
                         const response = await sendOrder(code, 'ask', executed_volume, '', 'market'); 
                     }
+                    
+                    updateRedis(`${code}-TRADE`, 'state', 'done');
+                    // const result = JSON.parse(await redisClient.get(`${code}-TRADE`))
+                    // result.state = 'done'
+                    // await redisClient.set(`${code}-TRADE`, JSON.stringify(result))
 
-                    const percent = (((trade_price / orderBook[code].amount) - 1) * 100).toFixed(4)
+                    const percent = (((trade_price / tradeData.amount) - 1) * 100).toFixed(4)
                     const msg = 
-                        `# SELL : ${code}\n` +
+                        `# SELL : ${code}  ( ${percent}%, ${trade_price - tradeData.amount} )\n` +
                         `====================================\n` +
                         `# Strategy : Volatility Breakout\n` +
                         `# ${Date(getCurrentUnixTime()).toLocaleString()}\n` +
                         `====================================\n` +
                         `* 매도 단가\n` +
-                        `   └>  ${trade_price}원 ( ${percent}% )\n` +
+                        `   └>  ${trade_price}원 ( ${percent}%, ${trade_price - tradeData.amount} )\n` +
                         `* 총 체결 금액 :\n` +
-                        `   └>  ${orderBook[code].quantity}개 ≈ ${(orderBook[code].quantity * trade_price).toFixed(4)}원\n` +
+                        `   └>  ${tradeData.quantity}개 ≈ ${(tradeData.quantity * trade_price).toFixed(4)}원\n` +
                         `* 손익 총계 :\n` +
-                        `   └>  ${(trade_price - orderBook[code].amount).toFixed(4)}원`
+                        `   └>  ${(trade_price - tradeData.amount).toFixed(4)}원\n`
 
                     bot.sendMessage(1690886101, msg);
 
@@ -507,8 +582,7 @@ const main = async() => {
             }
             
         } catch (error){
-            
-            //console.log(`on msg error : ${(JSON.parse(event.data.toString()).code)} ${error}`)
+            console.log(`on msg error : ${(JSON.parse(event.data.toString()).code)} ${error}`)
             if (error !== 'not initialized values'){
                 logger.log({level: 'error',  message: `error`})
                 console.log(`on msg error : ${(JSON.parse(event.data.toString()).code)} ${error}`)
